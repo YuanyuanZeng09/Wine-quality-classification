@@ -20,7 +20,7 @@ library(caret)
 # Load Dataset
 ```{r}
 #original dataset
-wine = read.csv("WineQT.csv") %>% janitor::clean_names()
+wine = read.csv("WineQT.csv") %>% janitor::clean_names() %>% mutate(quality = as.factor(quality))
 
 #copy of dataset
 df = wine
@@ -78,6 +78,21 @@ for(i in 7:9) {
 
 ** The distribution of `total_sulfur_dioxide` is right-skewed.
 
+Those skewed distributions should be transformed to normal distribution.
+
+## box boxplot
+```{r}
+colname = names(df[,1:11])
+
+for (i in colname){
+  plt = ggplot(data = df, aes_string(y = i, x = "quality", fill = "quality")) +
+  geom_boxplot()
+  
+  print(plt)
+  }
+```
+
+Some outliers are detected and needed to be removed when cleaning the data. The distributions of residual sugar and chorides are similar for all quality level.
 
 ## corrlations between variables
 ```{r}
@@ -87,7 +102,16 @@ corrplot(cor(df[,1:9]), type = "upper", diag = FALSE, method="circle")
 * correlations of `fixed_acidity` with `citric_acid` and `density` are positive.
 * correlations of `free_sulfur_dioxide` with `total_sulfur_dioxide` are positive.
 
+Calculate VIF for variables and remove variables with VIF greater 10.
 
+
+# Data Cleaning
+
+## duplicate data
+```{r}
+
+
+```
 
 
 
