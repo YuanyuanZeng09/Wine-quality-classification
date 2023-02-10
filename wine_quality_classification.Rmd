@@ -15,12 +15,14 @@ library(gtsummary)
 library(ggplot2)
 library(corrplot)
 library(caret)
+library(MASS)
+library(pROC)
 ```
 
 # Load Dataset
 ```{r}
 #original dataset
-wine = read.csv("WineQT.csv") %>% janitor::clean_names() %>% mutate(quality = as.factor(quality))
+wine = read.csv("WineQT.csv") %>% janitor::clean_names()
 
 #copy of dataset
 df = wine
@@ -44,6 +46,16 @@ tbl_summary(df)
 ```
 
 * The variables are not on the same scale.
+
+# Regroup the wine into two class based on quality
+
+The wine with quality of score less or equal to 5 are classified as low quality. The wine with quality greater than 5 are classified as high quality.
+
+```{r}
+df = df %>% mutate(quality = case_when(quality < 6 ~ 'low',
+                                       quality >5 ~ 'high')) %>% 
+  mutate(quality = factor(quality, levels = c('low', 'high')))
+```
 
 # Exploratory Data Analysis & Visualization
 
@@ -96,7 +108,10 @@ Some outliers are detected and needed to be removed when cleaning the data. The 
 
 ## corrlations between variables
 ```{r}
-corrplot(cor(df[,1:9]), type = "upper", diag = FALSE, method="circle")
+corrplot(cor(df[,1:9]), method="circle")
+
+cor(df %>% select(fixed_acidity:alcohol))
+
 ```
 
 * correlations of `fixed_acidity` with `citric_acid` and `density` are positive.
@@ -105,15 +120,168 @@ corrplot(cor(df[,1:9]), type = "upper", diag = FALSE, method="circle")
 Calculate VIF for variables and remove variables with VIF greater 10.
 
 
-# Data Cleaning
+# Data Transformation
 
-## duplicate data
+## spliting data into training set and test set
 ```{r}
+set.seed(123)
 
+rowTrain = createDataPartition(y = df$quality,
+                               p = 0.8,
+                               list = FALSE)
 
+traindata = df[rowTrain,]
+train_x = traindata[,1:11]
+testdata = df[-rowTrain,]
+test_x = testdata[,1:11]
+```
+
+## Transform and standardized data
+```{r}
+pp = preProcess(train_x,
+                method = c("scale", "center"))
+pp
+
+# transformed predictor variables
+train_x_pp = predict(pp, train_x)
+train_y = as.data.frame(traindata$quality)
+colnames(train_y) = c('quality')
+train_pp = bind_cols(train_x_pp,train_y)
+
+# transformed test variables
+test_x_pp = predict(pp, test_x)
+test_y = as.data.frame(testdata$quality)
+colnames(test_y) = c('quality')
+test_pp = bind_cols(test_x_pp,test_y)
 ```
 
 
+# Model Fitting
+
+Try the simple logistic regression with elastic net to overcome the high correlation between predictors
+
+## 1. Penalized Logistic Model with elastic net
+
+elastic net is effective in dealing with groups of highly correlated predictors.
+alpha is between 0 and 1 
+```{r}
+set.seed(123)
+
+ctrl = trainControl(method = 'repeatedcv', repeats = 5, 
+                    summaryFunction = twoClassSummary,
+                    classProbs = TRUE)
+
+enet.fit = train(quality ~ .,
+                 data = test_pp,
+                 method = 'glmnet',
+                 metric = 'ROC',
+                 trControl = ctrl,
+                 tuneGrid = expand.grid(alpha = seq(0, 1, length = 21),
+                                        lambda = exp(seq(-4, 4, length = 30))))
+
+enet.fit$bestTune
+
+myCol = rainbow(25)
+myPar = list(superpose.symbol = list(col = myCol),
+             superpose.line = list(col = myCol))
+
+plot(enet.fit, par.settings = myPar, xTrans = function(x) log(x))
+
+#model parameter
+coef(enet.fit$finalModel, enet.fit$bestTune$lambda)
+```
 
 
+## 2. Partial Least Square
+
+### Dimension Reduction
+
+```{r}
+set.seed(123)
+
+pls.fit = train(quality ~.,
+                data = test_pp,
+                method = 'pls',
+                tuneGrid = data.frame(ncomp=1:11),
+                trControl = ctrl,
+                metric = 'ROC')
+
+# visualize the component
+ggplot(pls.fit, highlight = TRUE)
+```
+
+## 3. MARS model
+
+```{r}
+set.seed(123)
+
+mars.model = train(quality ~.,
+                   data = test_pp,
+                   method = 'earth',
+                   tuneGrid = expand.grid(degree = 1:3,
+                                          nprune = 2:11),
+                   metric = 'ROC',
+                   trControl = ctrl)
+mars.model$bestTune
+
+plot(mars.model)
+
+coef(mars.model$finalModel)
+```
+
+## 4. Tree based model
+
+## random forest
+```{r}
+set.seed(123)
+rf.fit = train(quality ~.,
+               data = train_pp,
+               method = 'ranger',
+               metric = 'ROC',
+               tuneGrid = expand.grid(mtry = 1:11,
+                                      splitrule = 'gini',
+                                      min.node.size = seq(from = 2, to = 10, by =2)),
+               trControl = ctrl)
+
+ggplot(rf.fit, highlight = TRUE)
+```
+
+# Compare cross-validation performance
+
+```{r}
+res = resamples(list(
+  GLMNET = enet.fit,
+  PLS = pls.fit,
+  MARS = mars.model,
+  random_forest = rf.fit))
+
+summary(res)
+
+bwplot(res, metric = 'ROC')
+```
+
+* Pick random forest model for largest AUC mean
+
+# Test data performance
+```{r}
+rf.pred_prob = predict(rf.fit, newdata = test_x_pp, type = 'prob')[,1]
+
+rf.pred = rep('high', length(rf.pred_prob))
+
+rf.pred[rf.pred_prob>0.5] = 'low'
+
+roc.rf = roc(test_pp$quality, rf.pred_prob)
+
+auc = roc.rf$auc
+
+plot(roc.rf, legacy.axes = TRUE)
+plot(smooth(roc.rf), col = 4, add = TRUE, print.auc = TRUE)
+```
+
+# Confusion Matrix
+```{r}
+confusionMatrix(data = factor(rf.pred, levels = c("low","high")),
+                reference = test_pp$quality,
+                positive = "high")
+```
 
